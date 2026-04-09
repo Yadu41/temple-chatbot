@@ -22,64 +22,84 @@ else:
 @st.cache_resource
 def prepare_website_data(url):
     try:
+        # Load website content
         loader = WebBaseLoader(url)
         data = loader.load()
         
-        # New import path for text splitter
+        if not data:
+            st.error("Website returned no data. Check if the URL is correct.")
+            return None
+
+        # Split text into chunks
         text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
         docs = text_splitter.split_documents(data)
         
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        # FIX: Updated to the latest stable embedding model
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+        
         vector_store = FAISS.from_documents(docs, embeddings)
         return vector_store
     except Exception as e:
         st.error(f"Error reading website: {e}")
         return None
 
-# Initialize data
+# Initialize the data
 website_url = "https://shriramjankitemple.com/"
 vector_db = prepare_website_data(website_url)
 
 # --- STEP 2: AI BRAIN ---
 def get_ai_response(user_query, vector_db):
+    # Search the website data
     search_results = vector_db.similarity_search(user_query, k=3)
     context_text = "\n".join([doc.page_content for doc in search_results])
     
+    # Prompt with instructions for correct timings
     prompt = f"""
     You are 'Mandir Sahayak', the official assistant for Shri Ram Janki Temple.
-    Website Info: {context_text}
     
-    User Question: {user_query}
+    CONTEXT FROM WEBSITE:
+    {context_text}
     
-    Instructions:
-    - Use the info above to answer correctly (especially for timings).
-    - If asked in Hindi, reply in Hindi.
-    - Start with 'Jai Shree Ram'.
+    USER QUESTION: {user_query}
+    
+    STRICT INSTRUCTIONS:
+    1. Look at the WEBSITE DATA above for the answer.
+    2. If the user asks for 'timings', look specifically for AM and PM times. 
+    3. If you find multiple timings, explain them clearly.
+    4. If asked in Hindi, reply in Hindi.
+    5. Start with 'Jai Shree Ram'.
     """
     
     model = genai.GenerativeModel('gemini-1.5-flash')
     response = model.generate_content(prompt)
     return response.text
 
-# --- UI ---
+# --- UI INTERFACE ---
 st.title("🛕 Shri Ram Janki Temple AI")
-st.write(f"Live data from: {website_url}")
+st.write(f"Reading data from: {website_url}")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# Display chat history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if prompt := st.chat_input("Ask about timings..."):
+# User Input
+if prompt := st.chat_input("Ask about timings, location, or donations..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
         if vector_db:
-            with st.spinner("Reading website data..."):
-                answer = get_ai_response(prompt, vector_db)
-                st.markdown(answer)
-                st.session_state.messages.append({"role": "assistant", "content": answer})
+            with st.spinner("Searching website info..."):
+                try:
+                    answer = get_ai_response(prompt, vector_db)
+                    st.markdown(answer)
+                    st.session_state.messages.append({"role": "assistant", "content": answer})
+                except Exception as e:
+                    st.error(f"AI Error: {e}")
+        else:
+            st.error("The system could not read the website data. Please check the logs.")
