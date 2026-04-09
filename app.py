@@ -1,62 +1,78 @@
 import streamlit as st
 import google.generativeai as genai
+from langchain_community.document_loaders import WebBaseLoader
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain_google_genai import GoogleGenerativeAIEmbeddings
+import os
 
-# Page Config
-st.set_page_config(page_title="Shri Ram Janki Temple Assistant", page_icon="🛕")
+# --- PAGE CONFIG ---
+st.set_page_config(page_title="Live Temple Assistant", page_icon="🛕")
 
-# --- API KEY SETUP ---
+# --- API SETUP ---
 if "GOOGLE_API_KEY" in st.secrets:
-    api_key = st.secrets["GOOGLE_API_KEY"]
+    GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
+    os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
+    genai.configure(api_key=GOOGLE_API_KEY)
 else:
-    st.error("Please add your Google API Key to Streamlit Secrets!")
+    st.error("Please add GOOGLE_API_KEY to Streamlit Secrets!")
     st.stop()
 
-genai.configure(api_key=api_key)
-
-# --- AUTO-DETECT WORKING MODEL ---
+# --- STEP 1: SCRAPE & PROCESS WEBSITE ---
 @st.cache_resource
-def get_working_model():
-    available_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-    # Try to find these in order of preference
-    preferred_models = ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'models/gemini-pro']
+def prepare_website_data(url):
+    """Downloads website content and prepares a searchable database."""
+    try:
+        # Load the website content
+        loader = WebBaseLoader(url)
+        data = loader.load()
+        
+        # Split text into small chunks so AI can find specific facts
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        docs = text_splitter.split_documents(data)
+        
+        # Convert text chunks into 'Embeddings' (mathematical search vectors)
+        embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
+        vector_store = FAISS.from_documents(docs, embeddings)
+        return vector_store
+    except Exception as e:
+        st.error(f"Could not read website: {e}")
+        return None
+
+# Initialize the searchable database from the URL
+website_url = "https://shriramjankitemple.com/"
+vector_db = prepare_website_data(website_url)
+
+# --- STEP 2: AI BRAIN ---
+def get_ai_response(user_query, vector_db):
+    # 1. Search the website data for the most relevant text
+    search_results = vector_db.similarity_search(user_query, k=3)
+    context_text = "\n".join([doc.page_content for doc in search_results])
     
-    for model_path in preferred_models:
-        if model_path in available_models:
-            return model_path
+    # 2. Build a prompt that forces the AI to use the scraped text
+    prompt = f"""
+    You are 'Mandir Sahayak', the official assistant for Shri Ram Janki Temple.
+    Use ONLY the following information from the website to answer the user:
     
-    # If none of the above, just pick the first available one
-    return available_models[0] if available_models else None
+    WEBSITE DATA:
+    {context_text}
+    
+    USER QUESTION: {user_query}
+    
+    INSTRUCTIONS:
+    - If the answer is in the data (like timings or location), give the exact answer.
+    - If asked in Hindi, reply in Hindi.
+    - If the info is NOT in the data, say "I'm sorry, that specific information is not updated on our website yet."
+    - Be very respectful and start with 'Jai Shree Ram'.
+    """
+    
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    response = model.generate_content(prompt)
+    return response.text
 
-WORKING_MODEL_NAME = get_working_model()
-
-# --- TEMPLE DATA ---
-temple_context = """
-You are 'Mandir Sahayak', the official AI assistant for Shri Ram Janki Temple, Village Kherawa, Sitapur, UP.
-Website: https://shriramjankitemple.com/
-
-Tone: Very respectful, humble, and devotional. 
-Greetings: Start with 'Jai Shree Ram' or 'Namaste'.
-
-Knowledge Base:
-1. Deities: Lord Rama, Mata Sita, Lord Hanuman.
-2. Aarti Timings: Morning 6:30 AM, Evening 7:30 PM.
-3. Temple Hours: 6:00 AM to 9:00 PM.
-4. Donations: Help with Gaushala and temple maintenance. Direct users to the 'Donation' page on the website.
-5. Location: Village Kherawa, Lakhimpur Road, Sitapur, Uttar Pradesh.
-"""
-
-if WORKING_MODEL_NAME:
-    model = genai.GenerativeModel(
-        model_name=WORKING_MODEL_NAME,
-        system_instruction=temple_context
-    )
-else:
-    st.error("No compatible Gemini models found for this API key.")
-    st.stop()
-
-# --- UI ---
+# --- UI INTERFACE ---
 st.title("🛕 Shri Ram Janki Temple AI")
-st.caption(f"Connected via: {WORKING_MODEL_NAME}")
+st.write(f"Reading live from: {website_url}")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -65,19 +81,16 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-if prompt := st.chat_input("Ask about the temple..."):
+if prompt := st.chat_input("Ask me about timings, donations, or history..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        try:
-            response = model.generate_content(prompt)
-            if response.text:
-                answer = response.text
+        if vector_db:
+            with st.spinner("Searching website..."):
+                answer = get_ai_response(prompt, vector_db)
                 st.markdown(answer)
                 st.session_state.messages.append({"role": "assistant", "content": answer})
-            else:
-                st.warning("The AI could not generate a response. Try rephrasing.")
-        except Exception as e:
-            st.error(f"Error: {e}")
+        else:
+            st.error("I couldn't access the website data.")
