@@ -6,3 +6,4 @@ langchain-google-genai
 langchain-text-splitters
 beautifulsoup4
 faiss-cpu
+sentence-transformers
