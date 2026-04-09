@@ -3,7 +3,7 @@ import google.generativeai as genai
 from langchain_community.document_loaders import WebBaseLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import FAISS
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_community.embeddings import HuggingFaceEmbeddings
 import os
 
 # --- PAGE CONFIG ---
@@ -12,7 +12,6 @@ st.set_page_config(page_title="Live Temple Assistant", page_icon="🛕")
 # --- API SETUP ---
 if "GOOGLE_API_KEY" in st.secrets:
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
-    os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
     genai.configure(api_key=GOOGLE_API_KEY)
 else:
     st.error("Please add GOOGLE_API_KEY to Streamlit Secrets!")
@@ -22,20 +21,17 @@ else:
 @st.cache_resource
 def prepare_website_data(url):
     try:
-        # Load website content
+        # 1. Load website content
         loader = WebBaseLoader(url)
         data = loader.load()
         
-        if not data:
-            st.error("Website returned no data. Check if the URL is correct.")
-            return None
-
-        # Split text into chunks
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+        # 2. Split text into chunks
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=700, chunk_overlap=100)
         docs = text_splitter.split_documents(data)
         
-        # FIX: Updated to the latest stable embedding model
-        embeddings = GoogleGenerativeAIEmbeddings(model="models/text-embedding-004")
+        # 3. FIX: Use HuggingFace instead of Google for embeddings to avoid 404 errors
+        # This model is fast and runs on the Streamlit server itself
+        embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
         
         vector_store = FAISS.from_documents(docs, embeddings)
         return vector_store
@@ -43,7 +39,7 @@ def prepare_website_data(url):
         st.error(f"Error reading website: {e}")
         return None
 
-# Initialize the data
+# Initialize data
 website_url = "https://shriramjankitemple.com/"
 vector_db = prepare_website_data(website_url)
 
@@ -53,30 +49,31 @@ def get_ai_response(user_query, vector_db):
     search_results = vector_db.similarity_search(user_query, k=3)
     context_text = "\n".join([doc.page_content for doc in search_results])
     
-    # Prompt with instructions for correct timings
+    # Prompt with specific instructions for temple timings
     prompt = f"""
-    You are 'Mandir Sahayak', the official assistant for Shri Ram Janki Temple.
+    You are 'Mandir Sahayak', the official AI for Shri Ram Janki Temple.
     
-    CONTEXT FROM WEBSITE:
+    WEBSITE CONTEXT:
     {context_text}
     
     USER QUESTION: {user_query}
     
-    STRICT INSTRUCTIONS:
-    1. Look at the WEBSITE DATA above for the answer.
-    2. If the user asks for 'timings', look specifically for AM and PM times. 
-    3. If you find multiple timings, explain them clearly.
-    4. If asked in Hindi, reply in Hindi.
-    5. Start with 'Jai Shree Ram'.
+    STRICT RULES:
+    1. Answer using ONLY the WEBSITE CONTEXT above.
+    2. If the user asks for 'timings', look for the specific hours mentioned on the page (e.g., 5-11 AM, 4-9 PM).
+    3. If asked in Hindi, reply in Hindi.
+    4. Start with 'Jai Shree Ram'.
+    5. If the answer isn't in the data, say "I don't have that specific information yet."
     """
     
+    # Use Gemini 1.5 Flash for the chat response
     model = genai.GenerativeModel('gemini-1.5-flash')
     response = model.generate_content(prompt)
     return response.text
 
 # --- UI INTERFACE ---
 st.title("🛕 Shri Ram Janki Temple AI")
-st.write(f"Reading data from: {website_url}")
+st.write(f"Live data from: {website_url}")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -87,19 +84,19 @@ for message in st.session_state.messages:
         st.markdown(message["content"])
 
 # User Input
-if prompt := st.chat_input("Ask about timings, location, or donations..."):
+if prompt := st.chat_input("Ask about timings, donation, or history..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
         if vector_db:
-            with st.spinner("Searching website info..."):
+            with st.spinner("Reading website..."):
                 try:
                     answer = get_ai_response(prompt, vector_db)
                     st.markdown(answer)
                     st.session_state.messages.append({"role": "assistant", "content": answer})
                 except Exception as e:
-                    st.error(f"AI Error: {e}")
+                    st.error(f"AI Response Error: {e}")
         else:
-            st.error("The system could not read the website data. Please check the logs.")
+            st.error("Website data not available.")
