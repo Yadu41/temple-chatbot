@@ -35,8 +35,9 @@ Language:
 - Use 'Hinglish' if appropriate.
 """
 
+# CORRECT WAY
 model = genai.GenerativeModel(
-    model = genai.GenerativeModel('models/gemini-1.5-flash'),
+    model_name='gemini-1.5-flash',
     system_instruction=temple_context
 )
 
