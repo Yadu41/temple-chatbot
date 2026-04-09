@@ -8,114 +8,123 @@ from bs4 import BeautifulSoup as Soup
 import os
 import time
 
-# --- PAGE CONFIG ---
+# --- 1. PAGE CONFIG & STYLING ---
 st.set_page_config(page_title="Shri Ram Janki Temple AI", page_icon="🛕")
 
-# --- API SETUP ---
+# --- 2. API SETUP ---
 if "GOOGLE_API_KEY" in st.secrets:
     GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
     genai.configure(api_key=GOOGLE_API_KEY)
 else:
-    st.error("Please add GOOGLE_API_KEY to Streamlit Secrets!")
+    st.error("Missing GOOGLE_API_KEY in Streamlit Secrets!")
     st.stop()
 
-# --- DETECT MODEL ---
+# --- 3. AUTO-DETECT AVAILABLE GEMINI MODEL ---
 @st.cache_resource
-def get_working_model():
+def get_model_name():
     try:
         available = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        for pref in ['models/gemini-1.5-flash', 'models/gemini-pro']:
+        for pref in ['models/gemini-1.5-flash', 'models/gemini-1.5-pro', 'models/gemini-pro']:
             if pref in available: return pref
         return available[0]
     except: return 'models/gemini-pro'
 
-CHOSEN_MODEL = get_working_model()
+SELECTED_MODEL = get_model_name()
 
-# --- SCRAPE ENTIRE WEBSITE (RECURSIVE) ---
+# --- 4. LIVE WEBSITE CRAWLER (ALL PAGES) ---
 @st.cache_resource
-def prepare_full_website_data(url):
+def build_live_knowledge_base(url):
     try:
-        # RecursiveUrlLoader follows links on the page to find sub-pages
-        # max_depth=2 ensures it gets the home page and one level of sub-pages
+        # RecursiveUrlLoader follows links on the site to find sub-pages (About, Donation, etc.)
+        # max_depth=2 gets the homepage and everything linked from the menu
         loader = RecursiveUrlLoader(
             url=url, 
             max_depth=2, 
-            extractor=lambda x: Soup(x, "html.parser").text
+            extractor=lambda x: Soup(x, "html.parser").text,
+            prevent_outside=True # Stays only on shriramjankitemple.com
         )
-        data = loader.load()
         
-        if not data:
-            st.error("No data found on the website.")
+        st.info("Crawling website and sub-menus... please wait.")
+        raw_data = loader.load()
+        
+        if not raw_data:
             return None
-            
-        # Split all text from all pages into chunks
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
-        docs = text_splitter.split_documents(data)
+
+        # Break all pages into searchable chunks
+        text_splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
+        docs = text_splitter.split_documents(raw_data)
         
-        # Use HuggingFace embeddings (local) to avoid Google 404 errors
+        # Create a local search engine (Using HuggingFace to avoid Google 404 errors)
         embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        return FAISS.from_documents(docs, embeddings)
+        vector_db = FAISS.from_documents(docs, embeddings)
+        return vector_db
     except Exception as e:
-        st.error(f"Crawling Error: {e}")
+        st.error(f"Website Scraping Error: {e}")
         return None
 
-website_url = "https://shriramjankitemple.com/"
-# This might take a few seconds longer as it's reading multiple pages
-with st.spinner("Reading entire website and sub-pages..."):
-    vector_db = prepare_full_website_data(website_url)
+# Start Crawling
+target_url = "https://shriramjankitemple.com/"
+vector_db = build_live_knowledge_base(target_url)
 
-# --- AI LOGIC ---
-def get_ai_response(user_query, vector_db):
-    # Search top 5 matches across all pages
-    search_results = vector_db.similarity_search(user_query, k=5)
-    context = "\n".join([doc.page_content for doc in search_results])
+# --- 5. AI GENERATION LOGIC ---
+def ask_ai(user_query, db):
+    # Find the most relevant 5 sections from the entire website
+    docs = db.similarity_search(user_query, k=5)
+    context = "\n\n".join([d.page_content for d in docs])
     
     prompt = f"""
-    You are 'Mandir Sahayak', the official assistant for Shri Ram Janki Temple, Village Kherawa, Sitapur, UP.
+    You are 'Mandir Sahayak', a helpful and devotional AI assistant for Shri Ram Janki Temple.
     
-    WEBSITE DATA FROM ALL PAGES:
+    YOUR KNOWLEDGE BASE (FROM LIVE WEBSITE):
     {context}
     
-    STRICT RULES:
-    1. LOCATION: You are in Village Kherawa, Lakhimpur Road, Sitapur, Uttar Pradesh. 
-    2. DO NOT mention Kannauj.
-    3. TIMINGS: 5:00 AM to 11:00 AM and 4:00 PM to 9:00 PM.
-    4. Provide details about donations, history, or activities if they are in the data.
-    5. Always start with 'Jai Shree Ram'. Reply in the language of the user (Hindi/English).
+    USER QUESTION: {user_query}
+    
+    INSTRUCTIONS:
+    1. Answer using ONLY the 'KNOWLEDGE BASE' provided above.
+    2. If the data contains timings, location, or donation info, provide it exactly as written.
+    3. If the answer is NOT in the knowledge base, say: "I'm sorry, I don't have that information. Please check our website or visit the temple."
+    4. Start with a respectful greeting like 'Jai Shree Ram'.
+    5. Language: Answer in the same language as the user (Hindi or English).
     """
 
-    model = genai.GenerativeModel(CHOSEN_MODEL)
+    model = genai.GenerativeModel(SELECTED_MODEL)
     
-    # Retry logic for Quota (429)
-    for i in range(3):
+    # Retry loop to handle 429 Quota errors
+    for attempt in range(3):
         try:
             response = model.generate_content(prompt)
             return response.text
         except Exception as e:
             if "429" in str(e):
-                time.sleep(10) # Wait 10 seconds if quota hit
+                time.sleep(8)
                 continue
             return f"Error: {e}"
-    return "I am receiving too many questions right now. Please wait 30 seconds."
+    return "The AI is currently busy. Please try again in a few seconds."
 
-# --- UI ---
+# --- 6. STREAMLIT UI ---
 st.title("🛕 Shri Ram Janki Temple AI")
-st.write(f"Connected to: {CHOSEN_MODEL}")
+st.write(f"Source: {target_url} (All pages)")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+# Show chat history
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
 
-if prompt := st.chat_input("Ask about timings, donation, or any page on our site..."):
+# User input
+if prompt := st.chat_input("Ask about timings, donation, history..."):
     st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"): st.markdown(prompt)
+    with st.chat_message("user"):
+        st.markdown(prompt)
 
     with st.chat_message("assistant"):
         if vector_db:
             with st.spinner("Searching website..."):
-                answer = get_ai_response(prompt, vector_db)
+                answer = ask_ai(prompt, vector_db)
                 st.markdown(answer)
                 st.session_state.messages.append({"role": "assistant", "content": answer})
+        else:
+            st.error("I couldn't read the website data. Please check the URL.")
